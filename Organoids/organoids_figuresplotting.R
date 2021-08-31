@@ -1,5 +1,5 @@
 # This code will generate figures related to single nuclei RNA sequencing data obtained from Organoids.
-# We begin with loading pre-processed RDS file that contains merged Seurat object for all samples.
+# We begin with loading pre-processed RDS file that contains quality filtered merged Seurat object for all samples.
 
 suppressMessages(require(Seurat))
 suppressMessages(require(Matrix))
