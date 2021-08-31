@@ -21,8 +21,6 @@ random.seed(10)
 
 rule all:
     input:
-        "../4_uniquemapping/TE_count_matrix_0.csv",
-        "../4_uniquemapping/TE_count_matrix_1.csv",
         "../4_uniquemapping/TE_count_matrix_2.csv"
 
 # UNIQUE MAPPING ----
@@ -102,16 +100,12 @@ rule featureCounts:
         annotation="/projects/fs3/raquelgg/annotations/hg38/gencode/v30/gencode.v30.annotation.gtf",
         samples=expand("../1_mapping/{sample}_Aligned.sortedByCoord.out.bam", sample=LOCATION)
     output:
-        "../4_uniquemapping/0_featurecounts/gene_count_matrix_0.csv",
-        "../4_uniquemapping/0_featurecounts/gene_count_matrix_1.csv",
         "../4_uniquemapping/0_featurecounts/gene_count_matrix_2.csv"
     shell:
         """
         ml GCC/7.3.0-2.30  OpenMPI/3.1.1
         ml Subread/1.6.3
 
-        featureCounts -F GTF -g gene_id -a {input.annotation} -o {output[0]} {input.samples}
-        featureCounts -F GTF -s 1 -g gene_id -a {input.annotation} -o {output[1]} {input.samples}
         featureCounts -F GTF -s 2 -g gene_id -a {input.annotation} -o {output[2]} {input.samples}
 
         module purge
@@ -121,197 +115,17 @@ rule featureCounts_TEs:
         annotation="/projects/fs3/raquelgg/annotations/hg38/repeatmasker/hg38_rmsk_TEtranscripts.gtf",
         samples=expand("../1_mapping/{sample}_Aligned.sortedByCoord.out.bam", sample=LOCATION)
     output:
-        "../4_uniquemapping/TE_count_matrix_0.csv",
-        "../4_uniquemapping/TE_count_matrix_1.csv",
         "../4_uniquemapping/TE_count_matrix_2.csv"
     shell:
         """
         ml GCC/7.3.0-2.30  OpenMPI/3.1.1
         ml Subread/1.6.3
 
-        featureCounts -F GTF -g transcript_id -a {input.annotation} -o {output[0]} {input.samples}
-        featureCounts -s 1 -F GTF -g transcript_id -a {input.annotation} -o {output[1]} {input.samples}
         featureCounts -s 2 -F GTF -g transcript_id -a {input.annotation} -o {output[2]} {input.samples}
 
         module purge
         """
-# STD MAPPING ----
-rule stdmapping:
-    input:
-        "/projects/fs3/jakobssonlab/Seq036_Crispri_HP1B/fastq_files/{location}_R1.fastq.gz",
-        "/projects/fs3/jakobssonlab/Seq036_Crispri_HP1B/fastq_files/{location}_R2.fastq.gz",
-        "/projects/fs1/common/genome/lunarc/indicies/star/human/hg38/",
-        "/projects/fs3/raquelgg/annotations/hg38/gencode/v30/gencode.v30.annotation.gtf"
-    output:
-        "../5_stdmapping/{location}_Aligned.out.bam",
-        "../5_stdmapping/{location}_Aligned.sortedByCoord.out.bam"
-    shell:
-        """
-        #echo Mapping reads from {wildcards.location} to hg38!
-        ml GCC/5.4.0-2.26  OpenMPI/1.10.3
-        ml STAR/2.6.0c
-
-        STAR --runThreadN 10 \
-        --readFilesCommand gunzip -c \
-        --outSAMattributes All \
-        --outSAMtype BAM Unsorted SortedByCoordinate\
-        --genomeDir {input[2]} \
-        --sjdbGTFfile {input[3]} \
-        --outFileNamePrefix ../5_stdmapping/{wildcards.location}_ \
-        --readFilesIn  {input[0]} {input[1]}
-        module purge
-        """
-rule hg38_guided_readcount:
-    input:
-        "../5_stdmapping/{sample}_Aligned.sortedByCoord.out.bam",
-        "/projects/fs3/raquelgg/annotations/hg38/gencode/v30/gencode.v30.annotation.gtf"
-    output:
-        "../6_stdcounts/0_assembly/{sample}.gtf"
-    shell:
-        """
-        echo Transcript assembly with Hg38 as guide
-
-        ml GCC/6.4.0-2.28  OpenMPI/2.1.1
-        ml StringTie/1.3.3b
-
-        # -v   Turns on verbose mode
-        # --rf Assumes a stranded library fr-firststrand
-        # -p   Specify the number of processing threads
-        # -o   Sets the name of the output GTF file
-        # -G   Use the reference annotation file (in GTF or GFF3 format) to guide the assembly process
-        # -l   Prefix for the name of the output transcripts
-
-        stringtie -v --rf -p 5 -o {output} -G {input[1]} -l {wildcards.sample} {input[0]}
-
-        module purge
-        """
-rule hg38_guided_merging:
-    input:
-        "/projects/fs3/raquelgg/annotations/hg38/gencode/v30/gencode.v30.annotation.gtf",
-        expand("../6_stdcounts/0_assembly/{sample}.gtf", sample=LOCATION)
-    output:
-        "../6_stdcounts/0_assembly/gencode_guide_assembly/merged_samples.gtf",
-        "gtf_list.txt"
-    run:
-        with open("gtf_list.txt", "w") as fout:
-            fout.writelines(['../6_stdcounts/0_assembly/' + s + '.gtf\n' for s in LOCATION])
-        shell(
-            """
-            echo Merging transcripts assemblies into one
-
-            ml GCC/6.4.0-2.28  OpenMPI/2.1.1
-            ml StringTie/1.3.3b
-
-            # -t       Disables trimming at the ends of the assembled transcripts
-            # --merge  Transcript merge mode
-            # -p       Specify the number of processing threads
-            # -o  Sets the name of the output GTF file
-            # -G  Use the reference annotation file (in GTF or GFF3 format) to guide the assembly process
-
-            stringtie -t --merge -p 5 -o {output[0]} -G {input[0]}  {output[1]}
-
-            module purge
-            """)
-rule mergedsamples_guided_readcount:
-    input:
-        "../6_stdcounts/0_assembly/gencode_guide_assembly/merged_samples.gtf",
-        "../5_stdmapping/{sample}_Aligned.sortedByCoord.out.bam"
-    output:
-        "../6_stdcounts/0_assembly/merged_assembly/{sample}.gtf",
-        "../6_stdcounts/0_assembly/merged_assembly/{sample}.transcripts.gtf"
-    shell:
-        """
-        echo Using previous merged file to guide this new transcript assembly. Now all your samples will have same transcript ids.
-
-        ml GCC/6.4.0-2.28  OpenMPI/2.1.1
-        ml StringTie/1.3.3b
-
-        # -v    Turns on verbose mode
-        # -e    Limits the processing of read alignments to only estimate and output the assembled transcripts matching the reference transcripts given with the -G option
-        # -B    This switch enables the output of Ballgown input table files (*.ctab) containing coverage data for the reference transcripts given with the -G option.
-        # --rf  Assumes a stranded library fr-firststrand
-        # -p   Specify the number of processing threads
-        # -o   Sets the name of the output GTF file
-        # -G   Use the reference annotation file (in GTF or GFF3 format) to guide the assembly process
-        # -l   Prefix for the name of the output transcripts
-
-        stringtie -v -e -B --rf -p 5 -o {output[0]} -G {input[0]} -l {wildcards.sample} {input[1]}
-
-        module purge
-
-        echo Creating a gtf for transcripts only
-
-        cat {output[0]} | grep -w transcript > {output[1]}
-        """
-rule unbias_readcount:
-    input:
-        "../5_stdmapping/{sample}_Aligned.sortedByCoord.out.bam"
-    output:
-        "../6_stdcounts/1_unbias_assembly/{sample}.gtf"
-    shell:
-        """
-        ml GCC/6.4.0-2.28  OpenMPI/2.1.1
-        ml StringTie/1.3.3b
-
-        # -v   Turns on verbose mode
-        # --rf Assumes a stranded library fr-firststrand
-        # -p   Specify the number of processing threads
-        # -o   Sets the name of the output GTF file
-        # -l   Prefix for the name of the output transcripts
-
-        stringtie -v --rf -p 5 -o {output} -l {wildcards.sample} {input[0]}
-
-        module purge
-        """
-rule unbias_merging:
-    input:
-        expand("../6_stdcounts/1_unbias_assembly/{sample}.gtf", sample=LOCATION)
-    output:
-        "../6_stdcounts/1_unbias_assembly/unbias_assembly/merged_samples.gtf",
-        "gtf_list.txt"
-    run:
-        with open("gtf_list.txt", "w") as fout:
-            fout.writelines(['../6_stdcounts/1_unbias_assembly/' + s + '.gtf\n' for s in LOCATION])
-        shell(
-            """
-            echo Merging transcripts assemblies into one
-
-            ml GCC/6.4.0-2.28  OpenMPI/2.1.1
-            ml StringTie/1.3.3b
-
-            # -t       Disables trimming at the ends of the assembled transcripts
-            # --merge  Transcript merge mode
-            # -p       Specify the number of processing threads
-            # -o  Sets the name of the output GTF file
-            # -G  Use the reference annotation file (in GTF or GFF3 format) to guide the assembly process
-
-            stringtie -t --merge -p 5 -o {output[0]}  {output[1]}
-
-            module purge
-            """)
-
-rule FEELnc:
-    input:
-      "../6_stdcounts/0_assembly/gencode_guide_assembly/merged_samples.gtf",
-      "/projects/fs3/raquelgg/annotations/hg38/gencode/v30/gencode.v30.annotation.gtf",
-      "/projects/fs3/raquelgg/annotations/hg38/gencode/GRCh38.p12.genome.fa"
-    output:
-      "../9_FEELnc/feelnc_codpot_out/candidate_lncRNA.gtf",
-      "../9_FEELnc/feelnc_codpot_out/candidate_lncRNA.gff3"
-    shell:
-        """
-        ml FEELnc/0.1.1
-        grep -w exon {input[0]} | grep 'transcript_id "MSTR' > ../9_FEELnc/merged_samples_denovo_exons.gtf
-
-        FEELnc_filter.pl -i ../9_FEELnc/merged_samples_denovo_exons.gtf -a {input[1]} -b transcript_biotype=protein_coding > ../9_FEELnc/candidate_lncRNA.gtf
-        FEELnc_codpot.pl -i ../9_FEELnc/candidate_lncRNA.gtf -a {input[1]} -b transcript_biotype=protein_coding -g {input[2]} --mode=shuffle
-        FEELnc_classifier.pl -i ../9_FEELnc/feelnc_codpot_out/candidate_lncRNA.gtf.lncRNA.gtf -a {input[1]} > ../9_FEELnc/candidate_lncRNA_classes.txt
-        mv ../9_FEELnc/feelnc_codpot_out/candidate_lncRNA.gtf.lncRNA.gtf "../9_FEELnc/feelnc_codpot_out/candidate_lncRNA.gtf"
-
-        source deactivate
-
-        module purge
-        """
+        
 # MULTUMAPPING ----
 rule multimapping:
     input:
