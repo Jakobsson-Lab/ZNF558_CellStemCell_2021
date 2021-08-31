@@ -1,0 +1,206 @@
+---
+title: "ZNF558 ChIPseq analysis"
+author: "Raquel Garza"
+date: "8/30/2021"
+output: 
+  html_document:
+    code_folding: show
+---
+## Settings
+
+Here we load all packages we will be using
+
+```{r settings, class.source = 'fold-hide', message=FALSE}
+library(data.table)
+library(ggpubr)
+library(ggseqlogo)
+library(seqinr)
+library(stringr)
+library(Hmisc)
+library(RColorBrewer)
+library(stringr)
+library(ggplot2)
+library(data.table)
+library(ggmsa)
+```
+
+
+## Peak calling results
+
+Results from peak calling and annotation using HOMER.
+
+```{r peak_annotation, message=FALSE}
+# Annotated peaks by HOMER
+score20 <- fread('/Volumes/My Passport/z558/16.08.19/7_tagdir/peaks_score20.txt', data.table = F)
+annotation <- fread('/Volumes/My Passport/z558/16.08.19/7_tagdir/peaks_annotated.txt', data.table = F)
+colnames(annotation)[1] <- 'PeakID'
+colnames(score20) <- c('PeakID', 'Chr', 'Start', 'End', 'Strand', 'Normalized Tag Count', 'focus ratio',
+                       'findPeaks Score Total Tags', 'Control Tags (normalized to IP Experiment)',
+                       'Fold Change vs Control', 'p-value vs Control', 'Fold Change vs Local', 'p-value vs Local',
+                       'Clonal Fold Change')
+
+annotation_score20 <- annotation[which(annotation$PeakID %in% score20$PeakID),]
+
+annotation_score20$simplified_annotation <- capitalize(sapply(str_split(annotation_score20$`Detailed Annotation`, ' '), `[[`, 1))
+
+annotation_score20$simplified_annotation <- ifelse(grepl(paste(c("LINE", "SINE","LTR", "SVA", "DNA", "Simple_repeat"), collapse = "|"), annotation_score20$simplified_annotation), "TE", annotation_score20$simplified_annotation)
+annotation_score20$simplified_annotation <- ifelse(annotation_score20$simplified_annotation == "Intron", "Intron", 
+                                                    ifelse(annotation_score20$simplified_annotation == "Intergenic", "Intergenic", annotation_score20$simplified_annotation))
+annotation_score20$simplified_annotation <- ifelse(grepl(paste(c("3'", "5'","CpG", "Exon", "Non-coding", "Promoter-TSS", "TTS"), collapse = "|"), annotation_score20$simplified_annotation), "Gene", annotation_score20$simplified_annotation)                                                   
+annotation_score20$simplified_annotation <- factor(annotation_score20$simplified_annotation, levels = names(table(annotation_score20$simplified_annotation))[order(table(annotation_score20$simplified_annotation), decreasing = T)])
+
+ggplot(annotation_score20, aes(x=simplified_annotation, fill=simplified_annotation)) + geom_bar(position = 'dodge',  fill="steelblue") + theme_classic() + 
+    labs(x='', y='Num of peaks') + ggtitle("ZNF558 binding sites")
+
+annotation_score20_TE_gene <- data.frame(table(annotation_score20$simplified_annotation)[c("TE", "Gene")])
+
+ggplot(annotation_score20_TE_gene, aes(x=Var1, y=Freq)) + geom_bar(position = 'dodge', stat='identity', fill="steelblue") + theme_classic() + 
+  labs(x='', y='Num of peaks') + ggtitle("ZNF558 binding sites")
+
+```
+
+
+## SPATA18 binding site conservation
+
+Inspecting the peaks with the highest scores (plus the results of the CRISPRi of ZNF558 of course), we realized SPATA18 was the sole gene regulated by ZNF558.
+
+To check the conservation of the ZNF558 binding site in SPATA18, we used a set of 46 eutherian mammals at the comparative genomics section of Ensembl’s webtool.
+
+```{r spata18_binding_site_logo}
+msa = "/Volumes/My Passport/z558/16.08.19/10_SPATA18conservation/SPATA18_binding.aln"
+alignment <- read.alignment(file = msa, "clustal")
+
+alignment_length <- nchar(paste(sapply(alignment$seq, str_split, "\t")[[1]], collapse = ""))
+alignment_1.60 <- sapply(sapply(alignment$seq, str_split, "\t"), `[[`, 1)
+alignment_1.60 <- toupper(alignment_1.60)
+custom_color <- make_col_scheme(chars = c("A", "G", "T", "C"),
+                 cols=c("#fd6d6d","#f2be3c", "#73ce97", "#769dcc"),
+                 name="Chemestry_NT")
+
+
+
+msa = "/Volumes/My Passport/z558/16.08.19/10_SPATA18conservation/SPATA18_binding.aln.fa"
+p <- ggmsa(msa = msa, seq_name = TRUE, font = NULL, color = "Chemistry_NT")
+
+p + ggtitle("         ZNF558 binding site at SPATA18") + theme(text = element_text(size=12))
+
+ggplot() + geom_logo( alignment_1.60,  col_scheme = custom_color) + theme_logo()
+```
+
+## TE peak enrichment 
+
+TE class, family and subfamily enrichment from the peaks called by HOMER. We used TE-analysis_Shuffle_bed.pl from Aurelie Kapusta (https://github.com/4ureliek/TEanalysis/blob/master/TE-analysis_Shuffle_bed.pl) to perform the enrichment analysis. Docker container used can be found in this branch and the commands used to run the algorithm are documented as comments in the following block of code.
+
+Here are the results:
+```{r TE_enrichment}
+# Build the docker
+## docker build --tag bioperl_container -f ./src/Dockerfile .
+# Run it
+## docker run --rm -v /Volumes/My\ Passport/z558/16.08.19/to_docker/:/home -w '/home' --name bioperl_instance -t -i bioperl_container
+
+# HOMER hg38.basic.annotation.bed (a parsed version of hg38.basic.annotation that looks like):
+### chr1    1       10873   .       +       .       Intergenic      N
+### chr1    10874   11974   .       +       .       promoter-TSS (NR_046018)        P
+### chr1    11975   12227   .       +       .       non-coding (NR_046018, exon 1 of 3)     pseudo
+### chr1    12228   12612   .       +       .       intron (NR_046018, intron 1 of 2)       I
+### ...
+### ...
+
+# Contains some negative values, and we are only interested on intronic or intragenic elements. Therefore, we 
+# first need to make sure we only have positive features:
+## awk '{if($2>0&&$3>0){print $0}}' OFS="\t" hg38.basic.annotation.bed | grep 'intron\|Intergenic' > hg38.basic.annotation.noNegative.intron.Intergenic.bed
+
+# TE-analysis_Shuffle_bed.pl accepts only repeatmasker's output format. But since we are only checking
+# for intronic or intergenic TEs, a fair background would be all intronic or intragenic elements.
+# Therefore, we intersect the entire repeatmasker annotation with all introns and intronic regions (hg38.basic.annotation.noNegative.intron.Intergenic.bed)
+
+# |-----------this is just to have the coordinates at the front---------------------|------------------------------intersect with intronic/intergenic regions-------------------|--------------------We remove the first three columns (as we just added them for convenience)----------------|
+## tail -n +4 ../for_TEanalysis/hg38.fa.out | awk '{print $5, $6, $7, $0}' OFS="\t" | bedtools intersect -a stdin -b hg38.basic.annotation.noNegative.intron.Intergenic.bed -wa | awk '{print $4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18}' OFS="\t" > hg38.fa.intron.intergenic.out
+
+# Since we are also only interested on retrotransposons
+## grep 'LINE\|SINE\|LTR\|Retroposon' hg38.fa.intron.intergenic.out > hg38.fa.intron.intergenic.retrotransposon.out
+
+# Now we can run TE-analysis_Shuffle_bed.pl, with features as the peaks with a high score (>20),
+# The intronic/intergenic elements as the query to shuffle, chromosome sizes from UCSC, and the genome gaps (which were retrieved using --dogaps)
+
+## ../../TEanalysis/TE-analysis_Shuffle_bed.pl -f ../peaks_score20.bed -q hg38.fa.intron.intergenic.retrotransposon.out -s bed -r ../GRCh38.p13/hg38.chrom.sizes -e ../GRCh38.p13/GRCh38.p13.genome.fa.gaps.bed
+
+# Now to plot...
+peaks_enrich <- fread("/Volumes/My Passport/z558/16.08.19/to_docker/peaks_score20.bed.shuffle-bed.10/peaks_score20.bed.shuffle-bed.nonTE-no_low.boot-10.stats.tab.txt", data.table = F)
+colnames(peaks_enrich) <- c("Rclass", "Rfam", "Rname", "obs_hits", "%_obs_(%of_features)", "obs_tot_hits", "nb_of_trials(nb_of_TE_in_genome)", "exp_avg_hits", "exp_sd", "%_exp_(%of_features)", "exp_tot_hits(avg)", "obs_rank_in_exp", "2-tailed_permutation-test_pvalue(obs.vs.exp)", "significance", "binomal_test_proba",  "binomial_test_95%_confidence_interval", "binomial_test_pval",  "binomial_test_significance")
+
+peaks_enrich_class <- peaks_enrich[which(peaks_enrich$Rfam == "tot"),]
+peaks_enrich_class <- peaks_enrich_class[which(peaks_enrich_class$Rclass != "tot"),]
+
+peaks_enrich_class_melt <- reshape2::melt(peaks_enrich_class[,c("Rclass", "obs_hits", "exp_avg_hits")])
+
+tmp <- peaks_enrich_class[,c("Rclass", "binomial_test_pval", "binomial_test_significance", "obs_hits")]
+tmp$group1 <- "obs_hits"
+tmp$group2 <- "exp_avg_hits"
+tmp$y.position <- tmp$obs_hits + 20
+
+classes_order <- peaks_enrich_class[order(peaks_enrich_class$obs_hits, decreasing = T), "Rclass"]
+peaks_enrich_class_melt$Rclass <- factor(peaks_enrich_class_melt$Rclass, levels=classes_order)
+
+ggplot(peaks_enrich_class_melt, aes(x=Rclass, y=value)) + 
+  geom_bar(aes(fill=variable), stat = 'identity', position = "dodge") + theme_classic() + 
+  stat_pvalue_manual(tmp, label="p = {binomial_test_pval}", x="Rclass") + 
+  theme(text = element_text(size=15))  + 
+  labs(x="TE class", y="Num of overlaps", fill = "") +
+  ggtitle("ZNF558 binding sites") + scale_fill_discrete(labels=c("Observed", "Expected"))
+
+# Family level
+peaks_enrich_family <- peaks_enrich[which(peaks_enrich$Rname == "tot"),]
+peaks_enrich_family <- peaks_enrich_family[which(peaks_enrich_family$Rfam != "tot" & peaks_enrich_family$Rclass != "tot"),]
+
+peaks_enrich_family_melt <- reshape2::melt(peaks_enrich_family[,c("Rfam", "obs_hits", "exp_avg_hits")])
+
+tmp <- peaks_enrich_family[,c("Rfam", "binomial_test_pval", "binomial_test_significance", "obs_hits")]
+tmp$group1 <- "obs_hits"
+tmp$group2 <- "exp_avg_hits"
+tmp$y.position <- ifelse(tmp$Rfam %in% c("L2", "MIR"), tmp$obs_hits + 25, tmp$obs_hits + 10)
+
+families_order <- peaks_enrich_family[order(peaks_enrich_family$obs_hits, decreasing = T), "Rfam"]
+peaks_enrich_family_melt$Rfam <- factor(peaks_enrich_family_melt$Rfam, levels=families_order)
+
+ggplot(peaks_enrich_family_melt, aes(x=Rfam, y=value)) + 
+  geom_bar(aes(fill=variable), stat = 'identity', position = "dodge") + theme_classic() + 
+  theme(text = element_text(size=15),
+        axis.text.x = element_text(angle=70, hjust=1))  + 
+  labs(x="TE family", y="Num of overlaps", fill = "") +
+  ggtitle("ZNF558 binding sites") + scale_fill_discrete(labels=c("Observed", "Expected")) +
+  stat_pvalue_manual(tmp, label="binomial_test_significance", x="Rfam") 
+
+# L1s
+peaks_enrich_L1 <- peaks_enrich[which(peaks_enrich$Rfam == "L1"),]
+peaks_enrich_L1 <- peaks_enrich_L1[which(peaks_enrich_L1$Rfam != "tot" & peaks_enrich_L1$Rclass != "tot" & peaks_enrich_L1$Rname != "tot"),]
+
+peaks_enrich_L1 <- peaks_enrich_L1[order(peaks_enrich_L1$obs_hits, decreasing = T),]
+peaks_enrich_L1_top5 <- peaks_enrich_L1[1:5,] 
+
+peaks_enrich_L1_top5_melt <- reshape2::melt(peaks_enrich_L1_top5[,c("Rname", "obs_hits", "exp_avg_hits")])
+
+tmp <- peaks_enrich_L1_top5[,c("Rname", "binomial_test_pval", "binomial_test_significance", "obs_hits")]
+tmp$group1 <- "obs_hits"
+tmp$group2 <- "exp_avg_hits"
+tmp$y.position <- tmp$obs_hits + 2
+
+L1_order <- peaks_enrich_L1_top5[order(peaks_enrich_L1_top5$obs_hits, decreasing = T), "Rname"]
+peaks_enrich_L1_top5_melt$Rname <- factor(peaks_enrich_L1_top5_melt$Rname, levels=L1_order)
+
+ggplot(peaks_enrich_L1_top5_melt, aes(x=Rname, y=value)) + 
+  geom_bar(aes(fill=variable), stat = 'identity', position = "dodge") + theme_classic() + 
+  theme(text = element_text(size=15))  + 
+  labs(x="TE subfamily", y="Num of overlaps", fill = "") +
+  ggtitle("ZNF558 binding sites") + scale_fill_discrete(labels=c("Observed", "Expected")) +
+  stat_pvalue_manual(tmp, label="binomial_test_significance", x="Rname") 
+
+# We usually assume a mutation rate at 0.2% per million years. If the divergence is 1%, it means 5 years. Hence, divide the divergence by 0.2 to get the estimate of time.
+rmsk <- fread("/Volumes/My Passport/z558/16.08.19/to_docker/topL1s_intron.intergenic_peak_score20.out", data.table=F)
+rmsk$age <- rmsk$V2 / 0.2
+rmsk$V10 <- factor(rmsk$V10, L1_order)
+
+ggplot(rmsk, aes(x=V10, y=age)) + geom_boxplot(fill = "lightsteelblue3") + theme_classic() +
+  labs(x="", y="Millions of years") + theme(text = element_text(size=20)) 
+
+```
