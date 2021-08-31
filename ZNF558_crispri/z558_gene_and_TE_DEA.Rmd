@@ -1,0 +1,291 @@
+---
+title: "ZNF558 CRISPRi analysis"
+output:   
+  html_document:
+    code_folding: show
+---
+
+## Settings and functions
+
+Here we load all packages and define the functions we will be using
+
+```{r settings_functions, class.source = 'fold-hide', message=FALSE}
+library(data.table)
+library(stringr)
+library(DESeq2)
+library(ggplot2)
+library(gridExtra)
+library(RColorBrewer)
+library(pheatmap)
+library(rjson)
+
+mean_plot <- function(exp,dds,p=.05,l=0,id=F, ttl="", ref_condition = NA, repel='no', col1="firebrick3", col2="steelblue4", col3="black", highlights=NA, gene_names=c()){
+  library(DESeq2)
+  test <- results(dds)
+  test <- as.data.frame(test)
+  if(length(gene_names) > 1){
+    test <- merge(test, unique(gene_names[,c('gene_id', 'gene_name')]), by.x='row.names', by.y='gene_id')
+    rownames(test) <- make.unique(test$gene_name)
+  }
+  c2 = ref_condition
+  c1 = levels(dds$condition)[which(levels(dds$condition) != ref_condition)]
+
+  sign <- getSignName(x = test,p = p,l = l)
+  u <- sign$up
+  d <- sign$down
+
+  #color up and down sign..
+  colVec <- ifelse(test = (rownames(test) %in% u), yes = 'up',
+                   no = ifelse(test = (rownames(test) %in% d), yes = 'dw',
+                               no = 'ns'))
+  colVec[is.na(colVec)] <- 'ns' ## if NA make sure it's not counted as <p
+
+  #size of points
+  cexVec <- ifelse(test = (rownames(test) %in% u),
+                   yes = 0.35,
+                   no = ifelse(test = (rownames(test) %in% d),
+                               yes = 0.35, no = 0.3))
+
+
+  exp_log <- as.data.frame(log2(exp[,c(c1, c2)]))
+  exp_log$Name <- rownames(exp_log)
+  if("TRUE" %in% names(table(startsWith(exp_log$Name, 'ENSG')))){
+    exp_log <- merge(exp_log, unique(gene_names[,c('gene_id', 'gene_name')]), by.x='Name', by.y='gene_id')
+    rownames(exp_log) <- make.unique(exp_log$gene_name)
+    colnames(exp_log) <- c('gene_id', c1, c2, "Name")
+  }
+
+  exp_log$reg <- factor(ifelse(exp_log$Name %in% u, paste('upregulated in ', c1, ' (', length(u), ')', sep =''),
+                               ifelse(exp_log$Name %in% d, paste('downregulated in ', c1,' (', length(d), ')', sep =''), paste('not significant', ' (', (nrow(test) - length(u) - length(d)), ')', sep=''))))
+  library(ggrepel)
+
+  colors <- c(col1, col2, col3)
+  names(colors) <- c(NA, NA, NA)
+  for (i in 1:length(levels(exp_log$reg))){
+    if(startsWith(levels(exp_log$reg)[i], 'up')){
+      names(colors)[1] <- levels(exp_log$reg)[i]
+    }
+    if(startsWith(levels(exp_log$reg)[i], 'down')){
+      names(colors)[2] <- levels(exp_log$reg)[i]
+    }
+    if(startsWith(levels(exp_log$reg)[i], 'not')){
+      names(colors)[3] <- levels(exp_log$reg)[i]
+    }
+  }
+  colors <- colors[which(!is.na(names(colors)))]
+
+  exp_log <- as.data.frame(exp_log)
+
+  plt <- ggplot(exp_log, aes(x=get(c2), y=get(c1), label=Name, color=reg)) + geom_point(aes(size=cexVec))+ scale_color_manual(values=colors) + scale_size_continuous(range=c(1,2), guide=FALSE)
+  if(repel == 'upregulated'){
+    plt <- plt + geom_text_repel(data = subset(exp_log, Name %in% u))
+  }
+  if(repel == 'downregulated'){
+    plt <- plt + geom_text_repel(data = subset(exp_log, Name %in% d))
+  }
+  if(repel == 'yes'){
+    plt <- plt + geom_text_repel(data = subset(exp_log, Name %in% u | Name %in% d))
+  }
+
+  plt <- plt + labs(x=paste("log2(mean ",c2,")",sep=""),
+                    y=paste("log2(mean ",c1,")",sep=""),
+                    title=paste(ttl, paste(c1," vs. ",c2,sep=""), sep = ': '),
+                    subtitle=paste("p-adj < ",p,", log2(fc) > ",l,sep=""))+theme(
+                      plot.title = element_text( size=14, face="bold"),  panel.grid.major = element_line(colour="white"),
+                      panel.grid.minor = element_line(colour="white"), panel.background = element_rect(fill = "white",
+                                                                                                       colour = "white",
+                                                                                                       size = 0.5, linetype = "solid"),
+                      axis.line = element_line(size = 0.5, linetype = "solid",
+                                               colour = "black"),
+                      legend.title=element_blank()) +
+    theme(
+      legend.text = element_text(size=15),
+      plot.title = element_text(size = 20),
+      plot.subtitle = element_text(size = 17),
+      axis.text.x = element_text(size = 15),
+      axis.text.y = element_text(size = 15),
+      axis.title.x = element_text(size = 15,margin = margin(t = 20, r = 0, b = 0, l = 0)),
+      axis.title.y = element_text(size = 15,margin = margin(t = 0, r = 20, b = 0, l = 0)))
+
+
+
+
+  if(id==T) {
+
+    identify(log2(exp[,1]),log2(exp[,2]),labels = rownames(exp))
+
+  }
+
+  if(!is.na(highlights)){
+    plt <- plt + geom_point(data=exp_log[highlights,], aes(x=get(c2), y=get(c1)), colour="springgreen3", size=5, shape=1, stroke=2)
+  }
+  return(plt)
+
+}
+getSignName <- function(x,p,l=0) {
+
+  up <- x[!is.na(x$padj) & x$padj < p & x$log2FoldChange > l,]
+  down <- x[!is.na(x$padj) & x$padj < p & x$log2FoldChange < -l,]
+  return(list(up=rownames(up),down=rownames(down)))
+
+}
+getAverage <- function(dds) {
+
+  baseMeanPerLvl <- sapply( levels(dds$condition), function(lvl) rowMeans( counts(dds,normalized=TRUE)[,dds$condition == lvl] ) )
+  baseSDPerLvl <- sapply( levels(dds$condition), function(lvl) apply( counts(dds,normalized=TRUE)[,dds$condition == lvl],1,sd ) )
+  colnames(baseSDPerLvl) <- paste("st.dev:",colnames(baseSDPerLvl),sep="")
+  return(list(Mean=baseMeanPerLvl,SD=baseSDPerLvl))
+
+}
+
+```
+
+## Gene differential expression analysis
+
+- PCA plot using top 500 most variable genes, excluding genes in sexual chromosomes.
+- Mean plot with significantly different genes highlighted in red and blue in the mean plot. 
+- Plot showing log2(fold change) with confidence intervals of significantly different genes.
+- Heatmap of significantly different genes.
+
+```{r gene_DEA, message=FALSE }
+z558 <- fread('/Volumes/My Passport/z558/16.08.19/3_TEtranscripts/z558.cntTable', data.table = F)
+rownames(z558) <- z558$`gene/TE`
+coldata <- data.frame(samples = c(unlist(lapply(str_split(colnames(z558)[2:9], '/'), `[[`, 6)), unlist(lapply(str_split(colnames(z558)[10:ncol(z558)], '/'), `[[`, 5))),
+                      condition = unlist(lapply(str_split(colnames(z558)[-1], '/'), `[[`, 4)))
+rownames(coldata) <- coldata$samples
+coldata$samples <- as.character(coldata$samples)
+
+colnames(z558)[-1] <- c(unlist(lapply(str_split(colnames(z558)[2:9], '/'), `[[`, 6)),
+                        unlist(lapply(str_split(colnames(z558)[10:ncol(z558)], '/'), `[[`, 5)))
+
+transcript_gene <- fread('/Volumes/My Passport/annotations/human/gencode/v30/gencode.v30.annotation.transcript.id.name.type.tab', data.table=F, header = F)
+gene_annotation <- fread('/Volumes/My Passport/annotations/human/gencode/v30/gencode.v30.annotation.gene.bed', data.table=F, header = F)
+TE_classification <- fread('/Volumes/My Passport/annotations/human/repeatmasker/hg38_rmsk_TEtranscripts_classification.tab', data.table=F, header = F)
+
+colnames(transcript_gene) <- c('transcript_id', 'gene_id', 'gene_name', 'gene_type')
+colnames(TE_classification) <- c('TE_uniq', 'TE_id', 'TE_family', 'TE_class')
+colnames(gene_annotation) <- c('chr', 'start', 'end', 'gene_id', 'dot', 'strand')
+
+counts_gene <- subset(z558, startsWith(z558$`gene/TE`, 'ENS'))
+counts_TE <- subset(z558, !startsWith(z558$`gene/TE`, 'ENS'))
+
+colnames(counts_gene)[1] <- 'gene_id'
+colnames(counts_TE)[1] <- 'TE_id'
+
+rownames(counts_gene) <- counts_gene$gene_id
+rownames(counts_TE) <- counts_TE$TE_id
+
+counts_TE$TE_class <- unlist(lapply(str_split(counts_TE$TE_id, ':'), `[[`, 3))
+counts_TE <- subset(counts_TE, counts_TE$TE_class %in% c('LTR', 'LINE', 'SINE', 'LTR?', 'LINE?', 'SINE?', 'Retroposon', 'Retroposon?'))
+
+gene_dds <- DESeqDataSetFromMatrix(counts_gene[,rownames(coldata)], coldata, design = ~ condition)
+gene_dds$condition <- relevel(gene_dds$condition, "ctrl")
+gene_dds <- DESeq(gene_dds)
+gene_res <- results(gene_dds)
+gene_exp <- getAverage(gene_dds)
+
+counts_gene_pca <- merge(counts_gene, gene_annotation, by='gene_id')
+counts_gene_pca <- subset(counts_gene_pca, !counts_gene_pca$chr %in% c('chrX', 'chrY'))
+counts_gene_pca <- counts_gene_pca[,rownames(coldata)]
+
+gene_pca_dds <- DESeqDataSetFromMatrix(counts_gene_pca[,rownames(coldata)], coldata, design = ~ condition)
+gene_pca_dds$condition <- relevel(gene_pca_dds$condition, "ctrl")
+gene_pca_dds <- DESeq(gene_pca_dds)
+gene_pca_vst <- varianceStabilizingTransformation(gene_pca_dds)
+plotPCA(gene_pca_vst, ntop=500) + theme_classic() + labs(title=paste("Top 500 genes PCA (excluding sexual chromosomes)"))
+
+gene_res_df <- as.data.frame(gene_res)
+gene_exp_mean <- gene_exp$Mean
+
+mean_plot(exp=gene_exp_mean, dds=gene_dds, repel="yes", ref_condition = "ctrl", p=0.05, l=1, ttl='Gene DEA', gene_names = transcript_gene)
+
+gene_res_df <- as.data.frame(gene_res)
+gap <- c(which(!duplicated(coldata$condition))[which(which(!duplicated(coldata$condition)) != 1)]-1)
+gene_res_df_signdiff <- gene_res_df[which(gene_res_df$padj < 0.05 & abs(gene_res_df$log2FoldChange) > 1),]
+gene_res_df_signdiff$ci_low <- gene_res_df_signdiff$log2FoldChange - (qnorm(0.05)*gene_res_df_signdiff$lfcSE)
+gene_res_df_signdiff$ci_high <- gene_res_df_signdiff$log2FoldChange + (qnorm(0.05)*gene_res_df_signdiff$lfcSE)
+gene_res_df_signdiff$reg <- ifelse(gene_res_df_signdiff$log2FoldChange < 0, 'logFC < 0', 'logFC > 0')
+gene_res_df_signdiff$gene_id <- rownames(gene_res_df_signdiff)
+gene_res_df_signdiff <- merge(gene_res_df_signdiff, unique(transcript_gene[,c(2,3)]), by='gene_id')
+
+ggplot() +
+  geom_errorbar(data=gene_res_df_signdiff, mapping=aes(x=gene_name, ymin=ci_low, ymax=ci_high, colour=reg), width=0.2) +
+  geom_point(stat='identity',data=gene_res_df_signdiff, mapping=aes(x=gene_name, y=log2FoldChange, colour=reg)) +
+  coord_flip()+theme_bw() + scale_colour_manual(values=c("steelblue", 'tomato')) +
+  guides(fill=FALSE)+
+  labs(x="gene id", y= 'log2 Fold Change', title='Significantly different genes (padj < 0.05)\nError lines of 95% confidence intervals', colour="")+
+  theme(
+    plot.title = element_text(size = 18),
+    axis.text.x = element_text(size = 15),
+    legend.text = element_text(size = 13),
+    legend.title = element_text(size = 13),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 15,margin = margin(t = 20, r = 0, b = 0, l = 0)),
+    axis.title.y = element_text(size = 15,margin = margin(t = 0, r = 20, b = 0, l = 0)))+
+  geom_hline(yintercept = 0, color = "black", size=0.5)+
+  geom_rect(aes(xmin = -Inf, xmax = Inf, ymin = -0.5, ymax = 0.5), fill = 'lightpink',  alpha = 0.3,size = 2)+theme_bw()
+
+counts_gene_norm <- counts(gene_dds, normalize=T)
+pheatmap(log2(counts_gene_norm[gene_res_df_signdiff$gene_id, as.character(coldata$sample)]+0.5), gaps_col = gap, cluster_cols = F, cluster_rows = ifelse(nrow(gene_res_df_signdiff) > 1, TRUE, FALSE), show_colnames = F, annotation_col = coldata[,2, drop=FALSE], fontsize = 15, labels_row = gene_res_df_signdiff$gene_name)
+
+```
+
+## Neuronal markers
+
+Heatmap showing that cells have a forebrain neuronal fate.
+
+```{r neuronal_markers, message=FALSE }
+markers <- c('NANOG', 'POU5F1', 'KLF4', 'MYC', 'LIN28A', 'FOXG1', 'PAX6', 'EMX2', 'NKX2-1', 'DLX2', 'OTX1', 'EN1', 'LMX1A', 'CORIN', 'FOXA2', 'PAX8', 'HOXA2', 'SYP', 'NEUROD1', 'MYT1L', 'TUBB', 'DCX', 'TBR1', 'EOMES', 'CUX2', 'OLIG2', 'GFAP', 'EMX1')
+colnames(counts_gene_norm)
+counts_gene_norm <- merge(counts_gene_norm, unique(transcript_gene[,c("gene_name", "gene_id")]), by.x='row.names', by.y='gene_id')
+neuromarkers_counts <- subset(counts_gene_norm, counts_gene_norm$gene_name %in% markers)
+rownames(neuromarkers_counts) <- neuromarkers_counts$gene_name
+n=4
+pheatmap(log2(neuromarkers_counts[which(neuromarkers_counts$gene_name %in% markers),coldata$samples]+0.5), show_colnames = F, cluster_cols = F, cluster_rows = F, gaps_col = c(7), gaps_row = c(rep(5, n), rep(8, n), rep(10, n), rep(16, n), rep(17, n)),annotation_col = coldata[,2, drop=F], color = colorRampPalette(rev(brewer.pal(n = 7, name = "RdBu")))(100))
+```
+
+## TE subfamily differential expression analysis 
+
+- PCA plot using top 500 most variable TE subfamilies.
+- Mean plot showing no significant TE subfamilies being dysregulated
+
+```{r TE_DEA, message=FALSE }
+
+TE_dds <- DESeqDataSetFromMatrix(counts_TE[,rownames(coldata)], coldata, design = ~ condition)
+TE_dds$condition <- relevel(TE_dds$condition, "ctrl")
+TE_dds <- DESeq(TE_dds)
+TE_res <- results(TE_dds)
+TE_exp <- getAverage(TE_dds)
+TE_vst <- varianceStabilizingTransformation(TE_dds)
+
+plotPCA(TE_vst, ntop=500) + theme_classic() + labs(title=paste("Top 500 TEs PCA"))
+
+mean_plot(exp=TE_exp$Mean, dds=TE_dds, ref_condition = "ctrl", p=0.05, ttl='TE DEA', repel = 'yes')
+
+TE_res_df <- as.data.frame(TE_res)
+table(TE_res$padj < 0.05)
+```
+
+
+## TE (by element) differential expression analysis
+
+Quantification of individual TEs.
+- Mean plot highlighting individual TEs that reached significance.
+
+```{r unique_mapping_TE_DEA, message=FALSE }
+z558_uniq <- fread('/Volumes/My Passport/z558/16.08.19_vs2/4_uniqcounts/0_featurecounts/TE_count_matrix_2.csv', data.table=F)
+colnames(z558_uniq)[7:18] <- c(unlist(lapply(str_split(colnames(z558_uniq)[7:10], '/'), `[[`, 5)), unlist(lapply(str_split(colnames(z558_uniq)[11:18], '/'), `[[`, 6)))
+colnames(z558_uniq)[1] <- 'TE_id'
+
+z558_uniq_expr <- z558_uniq[which(rowSums(z558_uniq[, coldata$sample]) > 10),]
+rownames(z558_uniq_expr) <- z558_uniq_expr$TE_id
+
+TE_dds <- DESeqDataSetFromMatrix(z558_uniq_expr[,rownames(coldata)], coldata, design = ~ condition)
+TE_dds$condition <- relevel(TE_dds$condition, 'ctrl')
+TE_dds <- DESeq(TE_dds)
+TE_res <- results(TE_dds)
+TE_exp <- getAverage(TE_dds)
+
+mean_plot(exp=TE_exp$Mean, dds=TE_dds, ref_condition = "ctrl", p=0.05, l=0, ttl='TE unique DEA', repel = 'yes')
+
+```
