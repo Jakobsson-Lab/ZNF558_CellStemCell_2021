@@ -1,0 +1,169 @@
+# -*- coding: utf-8 -*-
+
+# lunarc configuration file
+# configuration file with sample list (yaml list)
+# hg38 genome directory
+
+configfile: "/projects/fs3/raquelgg/z558/16.08.19/src/config_files/config.yaml"
+
+LOCATION = config["location"]
+KO = config["ko"]
+CTRL = config["ctrl"]
+CHIPSEQ = config["chipseq"]
+# Run as:
+# snakemake -s Snakefile_znf558_chipseq -j 5 --cluster-config /projects/fs3/raquelgg/z558/16.08.19/src/config_files/lunarc_config.json --cluster "sbatch -A {cluster.account} -p {cluster.partition} --tasks-per-node {cluster.tasks-per-node}  -t {cluster.time} -o {cluster.o} -e {cluster.e} -J {cluster.J} -N {cluster.N}" --latency-wait 60
+
+from snakemake.utils import R
+import rpy2
+import random
+
+random.seed(10)
+
+rule all:
+    input:
+        "../7_tagdirs/z558_chip_tagdir/peaks_annotated.txt",
+        "../7_tagdirs/z557_chip_tagdir/peaks_annotated.txt",
+        "../8_znf558_motif/len14_/homerResults.html"
+
+# CHIPSEQ ----
+rule mapping_bt_z558:
+    input:
+        "../data/chipseq/{sample}.fastq.gz"
+    output:
+        "../1_mapping/chipseq/{sample}_bt2.sens-loc.sam"
+    shell:
+        """
+        mkdir -p ../1_mapping/chipseq/
+
+        #echo Mapping reads from {wildcards.sample} to hg38!
+        ml GCC/7.3.0-2.30  OpenMPI/3.1.1
+        ml Bowtie2/2.3.4.2
+
+        bowtie2 --sensitive-local -p 10 -x /projects/fs1/common/genome/lunarc/indicies/bowtie2/human/hg38/hg38 -U {input} -S {output}
+        module purge
+        """
+rule sam_filtering:
+    input:
+        "../1_mapping/chipseq/{sample}_bt2.sens-loc.sam"
+    output:
+        sam="../1_mapping/chipseq/filtered/{sample}_bt2.sens-loc.mapq10.sam",
+        statsU="../1_mapping/chipseq/filtered/{sample}_bt2.sens-loc.mapq10.stats",
+        statsM="../1_mapping/chipseq/{sample}_bt2.sens-loc.orig.stats",
+    shell:"""
+        ml GCC/5.4.0-2.26  OpenMPI/1.10.3
+        ml SAMtools/1.4
+        echo "> Filter MAPQ >10 to get unique reads:"
+        echo ">> samtools view -q 10 -h {input} > {output.sam}"
+        samtools view -q 10 -h {input} > {output.sam}
+        echo "> Stats unique reads:"
+        echo ">> samtools stats {output.sam} > {output.statsU}"
+        samtools stats {output.sam} > {output.statsU}
+        echo "> Stats all mapped reads:"
+        echo ">> samtools stats {input} > {output.statsM}"
+        samtools stats {input} > {output.statsM}
+        """
+rule samToBam:
+    input:
+        samU="../1_mapping/chipseq/filtered/{sample}_bt2.sens-loc.mapq10.sam",
+        samOrig="../1_mapping/chipseq/{sample}_bt2.sens-loc.sam"
+    output:
+        bamM="../1_mapping/chipseq/{sample}_bt2.sens-loc.bam",
+        bamU="../1_mapping/chipseq/filtered/{sample}_bt2.sens-loc.mapq10.bam"
+    shell:
+        """
+            ml GCC/5.4.0-2.26  OpenMPI/1.10.3
+            ml SAMtools/1.4
+            echo "> Convert to bam"
+            echo "> samtools view -Sb {input.samOrig} > {output.bamM}"
+            samtools view -Sb {input.samOrig} > {output.bamM}
+            echo "> samtools view -Sb {input.samU} > {output.bamU}"
+            samtools view -Sb {input.samU} > {output.bamU}
+        """
+rule BamToBw:
+    input:
+        "../1_mapping/chipseq/filtered/{sample}_bt2.sens-loc.mapq10.bam"
+    output:
+        "../1_mapping/chipseq/filtered/{sample}_bt2.sens-loc.mapq10.bw"
+    shell:
+        """
+            ml GCC/5.4.0-2.26  OpenMPI/1.10.3
+            ml SAMtools/1.4
+            ml foss/2016b
+            ml Python/3.5.2
+            basename=$(basename {input} .bam)
+            dirname=$(dirname {input})
+            sorted="$dirname/$basename.sorted.bam"
+
+            samtools sort -o $sorted {input}
+            samtools index -b $sorted
+            bamCoverage --normalizeUsingRPKM -b $sorted -o {output}
+        """
+rule makeTagDirectory:
+    input:
+        "../1_mapping/chipseq/filtered/{sample}_bt2.sens-loc.mapq10.sam"
+    output:
+        "../7_tagdirs/{sample}_tagdir/tagInfo.txt"
+    shell:
+        """
+        ml GCC/7.3.0-2.30 homer/4.10
+
+        makeTagDirectory ../7_tagdirs/{wildcards.sample}_tagdir {input}
+
+        module purge
+        """
+rule peakCalling:
+    input:
+        expand("../7_tagdirs/{sample}_tagdir/tagInfo.txt", sample=CHIPSEQ)
+    output:
+        "../7_tagdirs/z558_chip_tagdir/peaks.txt",
+        "../7_tagdirs/z557_chip_tagdir/peaks.txt"
+    shell:
+        """
+        ml GCC/7.3.0-2.30 homer/4.10
+
+        findPeaks ../7_tagdirs/z558_chip_tagdir/ -style factor -o auto -i ../7_tagdirs/input_chip_tagdir/
+        findPeaks ../7_tagdirs/z557_chip_tagdir/ -style factor -o auto -i ../7_tagdirs/input_chip_tagdir/
+
+        module purge
+        """
+rule annotatePeaks:
+    input:
+        "../7_tagdirs/z558_chip_tagdir/peaks.txt",
+        "../7_tagdirs/z557_chip_tagdir/peaks.txt"
+    output:
+        "../7_tagdirs/z558_chip_tagdir/peaks_annotated.txt",
+        "../7_tagdirs/z557_chip_tagdir/peaks_annotated.txt"
+    shell:
+        """
+        ml GCC/7.3.0-2.30 homer/4.10
+
+        annotatePeaks.pl {input[0]} hg38 > {output[0]}
+        annotatePeaks.pl {input[1]} hg38 > {output[1]}
+
+        module purge
+        """
+
+rule findMotif:
+    input:
+        "../7_tagdirs/z558_chip_tagdir/peaks_score20.txt"
+    output:
+        #"../8_znf558_motif/len30_homerResults.html",
+        #"../8_znf558_motif/len26_homerResults.html",
+        #"../8_znf558_motif/len22_homerResults.html",
+        #"../8_znf558_motif/len18_homerResults.html",
+        "../8_znf558_motif/len14_/homerResults.html"
+    shell:
+        """
+        module purge
+        ml GCC/7.3.0-2.30 homer/4.10
+
+        mkdir -p ../8_znf558_motif/preparsedDir
+
+        findMotifsGenome.pl {input} hg38 ../8_znf558_motif/len14_ -size 200 -len 14 -p 4 -preparsedDir ../8_znf558_motif/preparsedDir
+
+        module purge
+        """
+#findMotifsGenome.pl {input} hg38 ../8_znf558_motif/len30_ -size 200 -len 30 -p 4 -preparsedDir ../8_znf558_motif/preparsedDir
+#findMotifsGenome.pl {input} hg38 ../8_znf558_motif/len26_ -size 200 -len 26 -p 4 -preparsedDir ../8_znf558_motif/preparsedDir
+#findMotifsGenome.pl {input} hg38 ../8_znf558_motif/len22_ -size 200 -len 22 -p 4 -preparsedDir ../8_znf558_motif/preparsedDir
+#findMotifsGenome.pl {input} hg38 ../8_znf558_motif/len18_ -size 200 -len 18 -p 4 -preparsedDir ../8_znf558_motif/preparsedDir
