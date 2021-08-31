@@ -1,5 +1,6 @@
 # ZNF558_CellStemCell_2021
-Repository containing codes for ZNF558 CellStemCell paper "A human-specific structural variation at the ZNF558 locus controls a gene regulatory network during forebrain development".
+Repository containing codes for ZNF558 CellStemCell paper:<br/>
+"A human-specific structural variation at the ZNF558 locus controls a gene regulatory network during forebrain development".
 
 ## How to regenerate figures:
 Each folder contains code related to different types of datasets used in this study. Specifics below:<br/>
